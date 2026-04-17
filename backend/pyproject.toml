@@ -1,0 +1,81 @@
+[project]
+name = "turnero-backend"
+version = "0.1.0"
+description = "Turnero appointment booking backend (FastAPI + Postgres + JWT, multi-tenant)"
+requires-python = ">=3.12"
+readme = "README.md"
+dependencies = [
+    "fastapi>=0.115,<0.116",
+    "uvicorn[standard]>=0.32,<0.33",
+    "sqlalchemy[asyncio]>=2.0,<2.1",
+    "asyncpg>=0.30,<0.31",
+    "alembic>=1.13,<2.0",
+    "pydantic>=2.9,<3.0",
+    "pydantic-settings>=2.6,<3.0",
+    "pyjwt[crypto]>=2.9,<3.0",
+    "bcrypt>=4.2,<5.0",
+    "python-multipart>=0.0.12,<0.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<0.25",
+    "httpx>=0.27,<0.28",
+    "testcontainers[postgres]>=4.8,<5.0",
+    "ruff>=0.7,<0.8",
+    "mypy>=1.13,<2.0",
+    "factory-boy>=3.3,<4.0",
+    "freezegun>=1.5,<2.0",
+    "psycopg[binary]>=3.2,<4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "smoke: minimal sanity checks",
+    "integration: tests that hit a real Postgres",
+    "unit: tests that do not touch the DB",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",     # pycodestyle
+    "F",          # pyflakes
+    "I",          # isort
+    "B",          # bugbear
+    "UP",         # pyupgrade
+    "SIM",        # simplify
+    "TCH",        # type-checking imports
+    "RUF",        # ruff-specific
+]
+ignore = ["B008"]  # FastAPI uses Depends() in defaults
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B011"]
+"alembic/versions/*.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = []
+disallow_untyped_decorators = false  # FastAPI/SQLAlchemy decorators
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["testcontainers.*", "factory.*"]
+ignore_missing_imports = true
