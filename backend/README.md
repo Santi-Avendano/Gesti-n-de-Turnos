@@ -14,11 +14,11 @@ API para gestión de turnos con grilla de horarios predefinida, multi-tenant por
 | 0 | Bootstrap (pyproject, docker-compose, conftest, smoke test) | ✅ |
 | 1 | Slot computation engine (función pura + tests DST) | ✅ |
 | 2 | Modelos SQLAlchemy + migración inicial Alembic (con partial unique index) | ✅ |
-| 3 | Auth flow (RS256 + refresh rotation + reuse detection) | 🚧 endpoints listos, faltan tests integration |
-| 4 | Concurrencia RF-4.2 (booking_service + tests paralelos) | ⏳ |
-| 5 | Availability CRUD (grid + exceptions) | ⏳ |
-| 6 | Slots + Bookings endpoints (lifecycle completo) | ⏳ |
-| 7 | Health endpoints + main app + verificación E2E | ✅ health · ⏳ E2E |
+| 3 | Auth flow (RS256 + refresh rotation + reuse detection) + tenant isolation | ✅ |
+| 4 | Concurrencia RF-4.2 (booking_service + tests paralelos) | ✅ |
+| 5 | Availability CRUD (grid + exceptions) + Org PATCH | ✅ |
+| 6 | Slots + Bookings endpoints (lifecycle completo + admin/calendar) | ✅ |
+| 7 | Health endpoints + main app + verificación E2E | ✅ health · ⏳ E2E manual |
 
 ---
 
@@ -120,18 +120,49 @@ bookings (id, organization_id, user_id, start_at_utc, end_at_utc, status enum,
 | POST | `/logout` | refresh token | Revoca el refresh token actual (no leak en token desconocido) |
 | GET | `/me` | access token | Devuelve datos del usuario + org |
 
+### Organizations (`/api/v1/orgs`)
+
+| Método | Path | Auth | Descripción |
+|---|---|---|---|
+| GET | `/me` | access token | Config de la org del principal |
+| PATCH | `/me` | admin | Actualiza `name`, `slot_duration_minutes`, `booking_horizon_days`, `min_lead_minutes`. **Bloquea cambio de `timezone`** |
+
+### Availability (`/api/v1/availability`) — admin only
+
+| Método | Path | Descripción |
+|---|---|---|
+| GET | `/grid` | Lista reglas semanales (ordenadas por dow + hora) |
+| PUT | `/grid` | Reemplaza grilla completa atomicamente. Rechaza solapes intra-día |
+| GET | `/exceptions?from=&to=` | Lista excepciones con filtro opcional por rango |
+| GET | `/exceptions/{id}` | Detalle |
+| POST | `/exceptions` | Crea excepción (`full_day` o `range`) |
+| PATCH | `/exceptions/{id}` | Update parcial |
+| DELETE | `/exceptions/{id}` | Hard delete |
+
+### Slots (`/api/v1`)
+
+| Método | Path | Auth | Descripción |
+|---|---|---|---|
+| GET | `/slots?from=&to=` | access token | Slots disponibles. Limitado por `booking_horizon_days` |
+| GET | `/admin/calendar?from=&to=` | admin | Free slots + bookings con `user_email` |
+
+### Bookings (`/api/v1/bookings`)
+
+| Método | Path | Auth | Descripción |
+|---|---|---|---|
+| POST | `` | access token | `{slot_start_at_utc}`. Valida grid + exceptions + horizon + lead time. 409 si colisión |
+| GET | `/me` | access token | Mis bookings. Paginado (`page`, `page_size`), filtros `from/to/status` |
+| GET | `` | admin | Bookings de la org. Paginado, filtros `from/to/user_id/status` |
+| GET | `/{id}` | access token | User solo si es propio. Admin cualquiera de su org |
+| DELETE | `/{id}` | access token | User solo bookings futuros propios. Admin cualquiera |
+| PATCH | `/{id}` | admin | Reasigna a `new_slot_start_at_utc`. Cancel + create atómico |
+
 ### Health (`/api/v1`)
 
 | Método | Path | Descripción |
 |---|---|---|
 | GET | `/health` | Liveness (siempre 200 si proceso vivo) |
 | GET | `/health/ready` | Readiness — verifica conexión a DB con `SELECT 1` |
-
-### Pendientes (stubs creados, sin implementación)
-- `/api/v1/orgs/me` (GET, PATCH)
-- `/api/v1/availability/grid`, `/api/v1/availability/exceptions/...`
-- `/api/v1/slots`, `/api/v1/admin/calendar`
-- `/api/v1/bookings/...`
 
 ---
 
@@ -203,9 +234,11 @@ uv run mypy app
 ### Cobertura actual de tests
 - ✅ **Slot computation (12 tests, unit, sin DB)**: simple weekday grid, fin de semana, lunch break, slots no divisibles, exception full-day, exception partial-overlap, booking activo, slots pasados, `min_lead_minutes`, **DST spring-forward (NY)**, **DST fall-back fold=0**, Argentina (sin DST), rango vacío, frozen `Slot`.
 - ✅ **Smoke (2 tests, integration)**: `/health` y `/health/ready`.
-- ⏳ **Auth flow** (próximo): register → login → /me → refresh → logout → reuse detection.
-- ⏳ **Tenant isolation**: Org A no ve datos de Org B.
-- ⏳ **Concurrencia RF-4.2**: 10 tasks paralelos → exactamente 1×201 + 9×409.
+- ✅ **Auth flow** (`test_auth_flow.py`): register admin/user, login, /me, refresh rotation, **reuse detection** (revoca familia), logout, errores 401/409/422.
+- ✅ **Tenant isolation** (`test_tenant_isolation.py`): mismo email en dos orgs, login con org equivocada falla, /me devuelve org del JWT, claim `org_id` presente, refresh tokens independientes por org.
+- ✅ **Concurrencia RF-4.2** (`test_booking_concurrency.py`): 10 tasks paralelos → exactamente 1×ok + 9×conflict (engine separado, sin SAVEPOINT). Cancelar booking libera el slot.
+- ✅ **Availability CRUD** (`test_availability.py`): GET/PATCH org (timezone bloqueado), GET/PUT grid (atómico, rechaza solapes), CRUD exceptions, role enforcement, isolation cross-org.
+- ✅ **Bookings lifecycle** (`test_bookings_lifecycle.py`): /slots, book → desaparece → cancel → reaparece, double-booking 409, validación grid/past/horizon/alignment, paginación, admin/calendar, isolation cross-org.
 
 ---
 
@@ -225,9 +258,29 @@ http POST :8000/api/v1/auth/login \
 # 3. Verificar identidad
 TOKEN="<access_token>"
 http GET :8000/api/v1/auth/me Authorization:"Bearer $TOKEN"
-```
 
-(Endpoints de availability/slots/bookings aún no implementados.)
+# 4. Definir grilla (admin only)
+http PUT :8000/api/v1/availability/grid Authorization:"Bearer $TOKEN" \
+  rules:='[{"day_of_week":0,"start_local_time":"09:00:00","end_local_time":"18:00:00"},
+           {"day_of_week":1,"start_local_time":"09:00:00","end_local_time":"18:00:00"},
+           {"day_of_week":2,"start_local_time":"09:00:00","end_local_time":"18:00:00"},
+           {"day_of_week":3,"start_local_time":"09:00:00","end_local_time":"18:00:00"},
+           {"day_of_week":4,"start_local_time":"09:00:00","end_local_time":"18:00:00"}]'
+
+# 5. Listar slots disponibles para un rango (≤ booking_horizon_days)
+http GET ":8000/api/v1/slots?from=2026-04-20&to=2026-04-22" Authorization:"Bearer $TOKEN"
+
+# 6. Reservar un slot (slot_start_at_utc en formato ISO 8601 con tz)
+http POST :8000/api/v1/bookings Authorization:"Bearer $TOKEN" \
+  slot_start_at_utc="2026-04-20T12:00:00+00:00"
+
+# 7. Mis bookings
+http GET :8000/api/v1/bookings/me Authorization:"Bearer $TOKEN"
+
+# 8. Vista admin (slots libres + bookings con user_email)
+http GET ":8000/api/v1/admin/calendar?from=2026-04-20&to=2026-04-20" \
+  Authorization:"Bearer $TOKEN"
+```
 
 ---
 
@@ -259,8 +312,7 @@ http GET :8000/api/v1/auth/me Authorization:"Bearer $TOKEN"
 ---
 
 ## Próximos pasos
-1. **Cerrar Phase 3**: `tests/integration/test_auth_flow.py` + `test_tenant_isolation.py`.
-2. **Phase 4**: `booking_service.py` con mapeo `IntegrityError → 409` + test concurrente con asyncio.
-3. **Phase 5**: Availability CRUD endpoints.
-4. **Phase 6**: Slots + Bookings endpoints (lifecycle completo).
-5. **Phase 7**: Verificación E2E.
+1. **Verificación E2E manual** con httpie/curl (ver sección "Smoke manual" extendida abajo).
+2. **Correr la suite completa** localmente con Docker disponible: `uv run pytest`.
+3. **Wiring frontend** (otro proyecto sibling — fuera del scope de este backend).
+4. (Opcional) Métricas/observabilidad, rate-limiting, audit log dedicado — listados en "Out of scope".
